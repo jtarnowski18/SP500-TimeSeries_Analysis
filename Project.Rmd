@@ -1,0 +1,440 @@
+---
+title: "GDAT project"
+author: "Jacob Tarnowski"
+date: "11/29/2019"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Setting up Packages
+```{r}
+#For better Time Series plots
+library(tsbox)
+#Install data's package
+library(devtools)
+#Load in the data
+library(SP500R)
+#Work with dates
+library(stringr)
+#Data wrangling and cleaning
+library(tidyverse)
+#Time series EDA
+library(tseries)
+#fread()
+library(data.table)
+#Used for deciding number of clusters
+library(factoextra)
+#Used for Auto Arima
+library(forecast)
+#Used for deciding number of clusters
+library(NbClust)
+
+```
+
+#Data Cleaning and wrangling
+```{r}
+#Load in data
+stocks <- all_stocks()
+length(unique(stocks$Name))
+```
+
+###Selecting Desired Data
+```{r}
+#Take out duplicate company names
+first_Stocks <-stocks[!duplicated(stocks$Name),]
+#Break up dates (Easier to work with)
+first_Stocks$year <- str_split_fixed(first_Stocks$Date, "-", 3)[,1]
+stocks$year <- str_split_fixed(stocks$Date, "-", 3)[,1]
+
+#Look where stocks begin
+table(first_Stocks$year)
+filter(stocks)
+first_Stocks[first_Stocks$year == 2012,]
+#Found 2012-08-13 was the first day was that data collection began
+
+
+#Filter out the all of the observation that occured on the earliest date
+#Only selct Name because those are the stocks I am goin to use
+df.stocks <- stocks %>%
+  filter(Date == "2012-08-13")%>%
+  select(Name)
+#Join full data frame with vector of stocks I want to use to get rid of all of the observations to companies that are irrelavent to this analysis
+df.stocks <- left_join(df.stocks, stocks, by = "Name")
+
+#Filter out 2012 and 2017 to get 4 even frequencies
+df.stocks <- df.stocks%>%
+  filter(year > 2012, year < 2017)
+
+#Make sure that there is an equal about of observation for each stock
+tb.stocks <- as.data.frame(table(df.stocks$Name))
+names(tb.stocks)[1] <- "Name"
+names(tb.stocks)[2] <- "Frequency"
+tb.stocks <- tb.stocks%>%
+  filter(Frequency == 1008)
+
+#Only take the take the stocks that had 1008 Observations
+df.stocks <- left_join(tb.stocks, df.stocks, by = "Name")
+```
+
+###Creating difference in closing index column
+```{r}
+#Set up for creation of a column of difference in closing index's
+{
+#First Closing cost that gets thrown away by use of the lag function
+last = 41.88
+#Create a difference column
+df.stocks$diff <- 0
+#Lag Company name down one -> Gives the for loop to recognize change in company by
+df.stocks$namelag <- shift(df.stocks$Name, 1)
+#Fill in stuff messed up by the lag
+df.stocks$namelag[1] <- "A"
+df.stocks$diff[1] <- "0"
+}
+
+#For the length of the data frame frame minus the first observation find the difference between i closing index and the i-1 (last) closing index. If the name isn't equal to name lag make the difference zero and make the last equal to that observations closing value.
+for (i in 2:length(df.stocks$Frequency)) {
+    if(df.stocks$Name[i] == df.stocks$namelag[i]){
+      df.stocks$diff[i] <- df.stocks$Close[i] - last
+      last = df.stocks$Close[i]
+    } else {
+      df.stocks$diff[i] <- 0
+      last = df.stocks$Close[i]
+    }
+}
+#After is point I save the data frame and SPData.Rdata to prevent having to run the for loop over and over.
+```
+
+###Clustering
+```{r}
+load("C:/Users/jaket/OneDrive/Desktop/GDAT 626/SPData.Rdata")
+```
+
+```{r}
+#Select Data needed for clusering (Date is need for the conversion from long to wide data)
+stocks.long <- df.stocks %>%
+  select(., diff, Date, Name)
+
+#Turn Data from long to wide
+stocks.wide <- spread(data = stocks.long, key = Name, value = diff)
+# Remove the date column
+stocks.wide <- stocks.wide[,-1]
+#Create correlation matrix
+cor(stocks.wide, stocks.wide, 
+    method = "pearson",
+    use = "pairwise.complete.obs") -> cor.mat
+
+# Convert to a distance
+1 - cor.mat * cor.mat -> R2dist.mat
+as.dist(R2dist.mat) -> R2.dist
+
+# Cluster
+hclust(R2.dist, method = "average") -> stocks.cluster
+plot(stocks.cluster)
+
+#This gives us the ideal number of clusters to use (8 is the result)
+#fviz_nbclust(R2dist.mat, kmeans, method =  "gap_stat", k.max = 30)
+
+#Arrange the data into 8 clusters (Function Above tells me to use 8)
+dat <- kmeans(R2dist.mat, 8)
+
+
+```
+
+
+```{r}
+#Look at the center of each cluster
+plot(dat$centers, main = "Cluster Centers")
+
+#See Which company is in each cluster
+list <- as.data.frame(dat$cluster)
+#Make Name a vector again to join by
+df <- tibble::rownames_to_column(list, "Name")
+#Rename variable to make it easier to work with 
+names(df)[2] <- "Cluster"
+#Join with original cleaned and wrangled data frame, but with a vector telling what cluster each observation belongs in
+df.stocks <- full_join(df.stocks, df, by = c("Name"))
+#Load in Data frame with full company names and company catagory
+Names <- read.csv("C:/Users/jaket/OneDrive/Desktop/GDAT 626/SPNames.csv")
+#Rename columns for proper joining
+names(Names)[1] <- "Name"
+names(Names)[2] <- "FullNames"
+#Join data to have the full names and industry catagories in master data
+df.stocks <- full_join(df.stocks, Names, by = "Name")
+
+```
+```{r}
+#Break down data by cluster and plot pie charts
+{
+clust1 <- df.stocks %>%
+  filter(Cluster == 1)
+clust1.wide <- pivot_wider(clust1, names_from = "Name", values_from = "diff")
+count1 <- as.data.frame(table(clust1$Sector))
+count1$Freq <- count1$Freq/1008
+names(count1)[1] <- "Sector"
+
+pie1 <- ggplot(count1, aes(x= "", y=Freq, fill=Sector))+
+geom_bar(width = 1, stat = "identity")+
+  coord_polar("y", start=0)+
+  ggtitle("Sector Breakdown of Cluster 1") +
+  xlab("")+
+  ylab("")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+pie1
+}
+
+
+{
+count2 <- df.stocks %>%
+  filter(Cluster == 2)%>%
+  group_by(Sector)%>%
+  summarise("Freq" = length(Sector)/1008)
+
+
+pie2 <- ggplot(count2, aes(x= "", y=Freq, fill=Sector))+
+geom_bar(width = 1, stat = "identity")+
+  coord_polar("y", start=0)+
+  ggtitle("Sector Breakdown of Cluster 2") +
+  xlab("")+
+  ylab("")+
+  theme(plot.title = element_text(hjust = 0.5))
+pie2
+
+}
+
+
+{clust3 <- df.stocks %>%
+  filter(Cluster == 3)
+count3 <- as.data.frame(table(clust3$Sector))
+names(count3)[1] <- "Sector"
+count3$Freq <- count3$Freq/1008
+
+pie3 <- ggplot(count3, aes(x= "", y=Freq, fill=Sector))+
+geom_bar(width = 1, stat = "identity")+
+  coord_polar("y", start=0)+
+  ggtitle("Sector Breakdown of Cluster 3") +
+  xlab("")+
+  ylab("")+
+  theme(plot.title = element_text(hjust = 0.5))
+pie3
+}
+
+{clust4 <- df.stocks %>%
+  filter(Cluster == 4)
+  count4 <- as.data.frame(table(clust4$Sector))
+  names(count4)[1] <- "Sector"
+  count4$Freq <- count4$Freq/1008
+  
+  pie4 <- ggplot(count4, aes(x= "", y=Freq, fill=Sector))+
+geom_bar(width = 1, stat = "identity")+
+  coord_polar("y", start=0)+
+  ggtitle("Sector Breakdown of Cluster 4") +
+  xlab("")+
+  ylab("")+
+  theme(plot.title = element_text(hjust = 0.5))
+pie4
+}
+
+{clust5 <- df.stocks %>%
+  filter(Cluster == 5)
+count5 <- as.data.frame(table(clust5$Sector))
+names(count5)[1] <- "Sector"
+count5$Freq <- count5$Freq/1008
+
+pie5 <- ggplot(count5, aes(x= "", y=Freq, fill=Sector))+
+geom_bar(width = 1, stat = "identity")+
+  coord_polar("y", start=0)+
+  ggtitle("Sector Breakdown of Cluster 5") +
+  xlab("")+
+  ylab("")+
+  theme(plot.title = element_text(hjust = 0.5))
+pie5
+
+}
+
+{clust6 <- df.stocks %>%
+  filter(Cluster == 6)
+  count6 <- as.data.frame(table(clust6$Sector))
+  names(count6)[1] <- "Sector"
+  count6$Freq <- count6$Freq/1008
+  
+  pie6 <- ggplot(count6, aes(x= "", y=Freq, fill=Sector))+
+geom_bar(width = 1, stat = "identity")+
+  coord_polar("y", start=0)+
+  ggtitle("Sector Breakdown of Cluster 6") +
+  xlab("")+
+  ylab("")+
+  theme(plot.title = element_text(hjust = 0.5))
+pie6
+}
+
+{clust7 <- df.stocks %>%
+  filter(Cluster == 7)
+  count7 <- as.data.frame(table(clust7$Sector))
+  names(count7)[1] <- "Sector"
+  count7$Freq <- count7$Freq/1008
+  
+  pie7 <- ggplot(count7, aes(x= "", y=Freq, fill=Sector))+
+geom_bar(width = 1, stat = "identity")+
+  coord_polar("y", start=0)+
+  ggtitle("Sector Breakdown of Cluster 7") +
+  xlab("")+
+  ylab("")+
+  theme(plot.title = element_text(hjust = 0.5))
+pie7
+}
+
+{clust8 <- df.stocks %>%
+  filter(Cluster == 8)
+  count8 <- as.data.frame(table(clust8$Sector))
+  names(count8)[1] <- "Sector"
+  count8$Freq <- count8$Freq/1008
+  
+  pie8 <- ggplot(count8, aes(x= "", y=Freq, fill=Sector))+
+geom_bar(width = 1, stat = "identity")+
+  coord_polar("y", start=0)+
+  ggtitle("Sector Breakdown of Cluster 8") +
+  xlab("")+
+  ylab("")+
+  theme(plot.title = element_text(hjust = 0.5))
+pie8
+}
+
+
+
+```
+
+
+```{r}
+#Look at differences
+{
+clust1.wide <- clust1 %>%
+  select(Date, Name, diff)
+  clust1.wide <-spread(data = clust1.wide, key = Name, value = diff)
+  clust1.wide <- clust1.wide[,-1]
+clust1.ts <- ts(clust1.wide, frequency = 252)
+
+ts_plot(clust1.ts[,1:10])
+}
+  
+#Saved data after CLustering to prevent clustering having to have to run again (Saved as StocksCluster.Rdata)
+```
+
+```{r}
+#Averaged the stock's closing index's by Date and Cluster to give me a time series for each of the 14 clussters
+df.avg <- df.stocks %>%
+  group_by(Date, Cluster)%>%
+  summarise("ClusAvg" = mean(Close))%>%
+  spread(key = "Cluster", value = "ClusAvg")
+
+df.avg <- df.avg[,-1]
+ #Frequncy of 252, each cluster has 1008 observatins, looking at 4 years of data, 1008/4 = 252
+avg.ts <- ts(df.avg, frequency = 252)
+
+ts_ggplot(avg.ts)+
+  ggtitle("S&P 500 Clustered Average Closing index's")+
+  theme(plot.title = element_text(hjust = 0.5))+
+  ylab("Closing Index")+
+  xlab("Year (2013 - 2016)")+ 
+  labs(color='Clustser')
+  
+```
+
+
+```{r}
+#Create a function that makes a time-series plot a decomposition plot, a acf plot and a pacf plot all in one
+edf.fun <- function(x, y) {
+  TimeSeries <- ts(df.avg[x], frequency = 252)
+   plot(TimeSeries, xlab = "Year (2013 - 2016)", ylab = "Closing Index", main = "Time Series Plot: Cluster 1")
+   plot(decompose(TimeSeries))
+   acf(df.avg[x], na.action = na.pass)
+   pacf(df.avg[x], na.action = na.pass)
+  
+}
+
+```
+
+#Exploritory Data Analysis For Cluster 1
+```{r}
+edf.fun(1,1)
+```
+
+#Exploritory Data Analysis For Cluster 2
+```{r}
+edf2 <-edf.fun(2,4)
+edf2
+```
+
+#Exploritory Data Analysis For Cluster 3
+```{r}
+edf3 <-edf.fun(3,4)
+edf3
+```
+
+#Exploritory Data Analysis For Cluster 4
+```{r}
+edf4 <-edf.fun(4,4)
+```
+
+#Exploritory Data Analysis For Cluster 5
+```{r}
+edf5 <-edf.fun(5,4)
+```
+
+#Exploritory Data Analysis For Cluster 6
+```{r}
+edf6 <-edf.fun(6,4)
+```
+
+#Exploritory Data Analysis For Cluster 7
+```{r}
+edf7 <-edf.fun(7,4)
+```
+
+#Exploritory Data Analysis For Cluster 8
+```{r}
+edf8 <-edf.fun(8,4)
+```
+
+
+```{r}
+#Run auto.arimas
+#arima1 <- auto.arima(ts(df.avg[1], frequency = 252)) %>% forecast(h= 63)
+summary(arima1)
+plot(arima1, main = "Forecast for Arima (0,1,0): Cluster 1", xlab = "Year (2013 - 2016)", ylab = "Closing Index's")
+
+#arima2 <- auto.arima(ts(df.avg[2], frequency = 252)) %>% forecast(h=63)
+plot(arima2, main = "Forecasts from Arima (1,0,1): Cluster 2")
+summary(arima2)
+
+#rima3 <- auto.arima(ts(df.avg[3], frequency = 252)) %>% forecast(h=63)
+plot(arima3, main = "Forecasts from Arima (0,1,0): Cluster 3")
+summary(arima3)
+
+#arima4 <- auto.arima(ts(df.avg[4], frequency = 252)) %>% forecast(h=63)
+plot(arima4, main = "Forecasts from Arima (0,1,0): Cluster 4" )
+summary(arima4)
+
+#arima5 <- auto.arima(ts(df.avg[5], frequency = 252)) %>% forecast(h=63)
+plot(arima5 , main = "Forecasts from Arima (0,1,0): Cluster 5")
+summary(arima5)
+
+#arima6 <- auto.arima(ts(df.avg[6], frequency = 252)) %>% forecast(h=63)
+plot(arima6, main = "Forecasts from Arima (0,1,0): Cluster 6")
+summary(arima6)
+
+#arima7 <- auto.arima(ts(df.avg[7], frequency = 252)) %>% forecast(h=63)
+plot(arima7, main = "Forecasts from Arima (1,1,1): Cluster 7")
+summary(arima7)
+
+#arima8 <- auto.arima(ts(df.avg[8], frequency = 252)) %>% forecast(h=63)
+plot(arima8, main = "Forecasts from Arima (0,1,0): Cluster 8")
+summary(arima8)
+
+
+
+```
+
